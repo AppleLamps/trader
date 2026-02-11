@@ -56,6 +56,7 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
     book_lock = threading.Lock()
     markets_by_token: dict[str, object] = {}  # token_id → Market
     all_markets: list = []
+    refresh_markets_requested = threading.Event()
 
     def on_book_update(data):
         """Called when a full orderbook snapshot is pushed."""
@@ -91,6 +92,8 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
         # Subscribe to the new market's assets for monitoring
         if assets:
             ws_client.subscribe(assets)
+        # Trigger immediate refresh so new market enters scan set quickly.
+        refresh_markets_requested.set()
 
     def on_market_resolved(data):
         """Market resolved — trigger position settlement."""
@@ -142,9 +145,11 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
         try:
             # Use the batch REST endpoint for a full snapshot periodically
             # The WS updates are incremental; we do a full refresh every N cycles
-            if cycle == 1 or cycle % 20 == 0:
+            needs_full_refresh = cycle == 1 or cycle % 20 == 0 or refresh_markets_requested.is_set()
+            if needs_full_refresh:
                 log.info("--- Full market refresh (cycle %d) ---", cycle)
                 all_markets = fetch_active_markets(limit=500, min_liquidity=cfg.min_market_liquidity)
+                refresh_markets_requested.clear()
 
                 # Discover new tokens to subscribe to
                 new_tokens = []
@@ -187,6 +192,8 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
                 min_arb_value=cfg.min_arb_value,
                 min_cost_threshold=cfg.min_cost_threshold,
                 max_profit_per_share=cfg.max_profit_per_share,
+                min_roi=cfg.min_roi,
+                min_fill_confidence=cfg.min_fill_confidence,
                 preloaded_orderbooks=ws_orderbooks if ws_orderbooks else None,
                 fetch_missing_orderbooks=use_rest_fallback,
             )
@@ -198,19 +205,25 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
                 for i, opp in enumerate(opps, 1):
                     fee_label = f"fee={opp.fee_rate_bps}bps" if opp.fee_rate_bps > 0 else "FREE"
                     log.info(
-                        "  #%d: '%s' | profit=$%.4f/sh | max=%d | est=$%.2f | %s",
+                        "  #%d: '%s' | profit=$%.4f/sh | roi=%.2f%% | fill=%.0f%% | score=%.3f | max=%d | est=$%.2f | %s",
                         i, opp.market.question[:50], opp.profit_per_share,
+                        opp.roi * 100.0, opp.fill_confidence * 100.0, opp.priority_score,
                         int(opp.max_shares), opp.estimated_profit, fee_label,
                     )
 
                 # Execute best opportunities
                 if risk.can_trade():
+                    executed_this_cycle = 0
                     for opp in opps:
                         if not risk.can_trade() or shutdown_requested:
+                            break
+                        if cfg.max_trades_per_cycle > 0 and executed_this_cycle >= cfg.max_trades_per_cycle:
+                            log.info("Reached max trades per cycle (%d).", cfg.max_trades_per_cycle)
                             break
                         success = executor.execute_arb(opp)
                         if success:
                             total_arbs_executed += 1
+                            executed_this_cycle += 1
                 else:
                     log.warning("Risk limits reached. %s", risk.summary())
 
@@ -264,6 +277,8 @@ def run_polling_mode(cfg, log, poly, risk, executor):
                 min_arb_value=cfg.min_arb_value,
                 min_cost_threshold=cfg.min_cost_threshold,
                 max_profit_per_share=cfg.max_profit_per_share,
+                min_roi=cfg.min_roi,
+                min_fill_confidence=cfg.min_fill_confidence,
             )
 
             total_arbs_found += len(opps)
@@ -275,19 +290,25 @@ def run_polling_mode(cfg, log, poly, risk, executor):
                 for i, opp in enumerate(opps, 1):
                     fee_label = f"fee={opp.fee_rate_bps}bps" if opp.fee_rate_bps > 0 else "FREE"
                     log.info(
-                        "  #%d: '%s' | profit=$%.4f/sh | max=%d | est=$%.2f | %s",
+                        "  #%d: '%s' | profit=$%.4f/sh | roi=%.2f%% | fill=%.0f%% | score=%.3f | max=%d | est=$%.2f | %s",
                         i, opp.market.question[:50], opp.profit_per_share,
+                        opp.roi * 100.0, opp.fill_confidence * 100.0, opp.priority_score,
                         int(opp.max_shares), opp.estimated_profit, fee_label,
                     )
 
                 # 3. Execute (best opportunity first)
                 if risk.can_trade():
+                    executed_this_cycle = 0
                     for opp in opps:
                         if not risk.can_trade() or shutdown_requested:
+                            break
+                        if cfg.max_trades_per_cycle > 0 and executed_this_cycle >= cfg.max_trades_per_cycle:
+                            log.info("Reached max trades per cycle (%d).", cfg.max_trades_per_cycle)
                             break
                         success = executor.execute_arb(opp)
                         if success:
                             total_arbs_executed += 1
+                            executed_this_cycle += 1
                 else:
                     log.warning("Risk limits reached — no more trades allowed. %s", risk.summary())
 
@@ -321,14 +342,18 @@ def main():
     log.info("=" * 60)
     log.info("Mode: %s", "DRY RUN (no real trades)" if cfg.dry_run else "LIVE TRADING")
     log.info("Min profit margin: $%.4f per share", cfg.min_profit_margin)
+    log.info("Min ROI: %.2f%% | Min fill confidence: %.0f%%", cfg.min_roi * 100.0, cfg.min_fill_confidence * 100.0)
     log.info("Max position size: $%.2f", cfg.max_position_size)
     log.info("Max total exposure: $%.2f", cfg.max_total_exposure)
+    log.info("Max trades per cycle: %d", cfg.max_trades_per_cycle)
     log.info("Fees: Per-market lookup (most = 0%%)")
     log.info("Data mode: %s", "WebSocket (real-time)" if cfg.ws_enabled else "Polling")
     log.info("Execution: %s",
              f"batch={'ON' if cfg.use_batch_orders else 'OFF'} "
              f"| FOK={'ON' if cfg.use_fok_orders else 'OFF'} "
-             f"| GTD={cfg.gtd_expiry_seconds}s")
+             f"| GTD={cfg.gtd_expiry_seconds}s "
+             f"| strict_match={'ON' if cfg.require_full_match else 'OFF'} "
+             f"| fail_cooldown={cfg.failure_cooldown_seconds}s")
     log.info("Builder: %s", "ENABLED" if cfg.has_builder_config else "disabled")
     log.info("Heartbeat: %s", f"ON ({cfg.heartbeat_interval}s)" if cfg.heartbeat_enabled else "OFF")
     log.info("Balance check: %s", "ON" if cfg.balance_check_enabled else "OFF")
@@ -359,11 +384,9 @@ def main():
     if cfg.balance_check_enabled:
         clob_balance = poly.get_usdc_balance()
         wallet_balance = poly.get_onchain_usdc_balance()
-        total_available = max(clob_balance, wallet_balance)
-        log.info("USDC balance: $%.2f (CLOB: $%.2f | Wallet: $%.2f)",
-                 total_available, clob_balance, wallet_balance)
-        if total_available < 1.0 and not cfg.dry_run:
-            log.error("Insufficient USDC for live trading!")
+        log.info("USDC balances: CLOB=$%.2f (tradable) | Wallet=$%.2f (requires deposit)", clob_balance, wallet_balance)
+        if clob_balance < 1.0 and not cfg.dry_run:
+            log.error("Insufficient CLOB collateral for live trading!")
             sys.exit(1)
 
     risk = RiskManager(cfg)
@@ -401,8 +424,10 @@ def main():
         for t in executor.trade_log:
             status = "DRY" if t["dry_run"] else ("FAIL" if t["failed"] else "OK")
             fee_label = f"fee={t.get('fee_rate_bps', '?')}bps" if t.get("fee_rate_bps", 0) > 0 else "FREE"
-            log.info("  [%s] %s | %d shares | cost=$%.2f | profit=$%.4f | %s",
-                     status, t["market"][:40], t["shares"], t["cost"], t["expected_profit"], fee_label)
+            log.info("  [%s] %s | %d shares | cost=$%.2f | profit=$%.4f | roi=%.2f%% | fill=%.0f%% | score=%.3f | %s",
+                     status, t["market"][:40], t["shares"], t["cost"], t["expected_profit"],
+                     t.get("roi", 0.0) * 100.0, t.get("fill_confidence", 0.0) * 100.0,
+                     t.get("priority_score", 0.0), fee_label)
     log.info("=" * 60)
 
 
