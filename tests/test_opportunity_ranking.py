@@ -62,8 +62,8 @@ class OpportunityRankingTests(unittest.TestCase):
         market_high_roi = make_binary_market("m2", "High ROI", "yes2", "no2")
         market_low_roi_big_size = make_binary_market("m3", "Low ROI bigger size", "yes3", "no3")
         preloaded = {
-            # High ROI (~5.26%), moderate absolute profit
-            "yes2": (0.46, 80.0),
+            # High ROI (~4.93%), moderate absolute profit
+            "yes2": (0.463, 80.0),
             "no2": (0.49, 80.0),
             # Lower ROI (~2.04%), larger absolute profit
             "yes3": (0.48, 300.0),
