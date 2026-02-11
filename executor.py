@@ -32,6 +32,41 @@ class Executor:
         self.dry_run = dry_run
         self.trade_log: list[dict] = []
 
+    @staticmethod
+    def _status_is_matched(status: str) -> bool:
+        return str(status or "").strip().lower() == "matched"
+
+    def _validate_order_response(self, response: dict, context: str) -> bool:
+        """Validate a placement response means the leg is truly executed."""
+        if not isinstance(response, dict):
+            log.error("%s: malformed response: %r", context, response)
+            return False
+
+        success = response.get("success", True)
+        error = str(response.get("errorMsg", "") or "")
+        order_id = response.get("orderID") or response.get("orderId") or ""
+        status = str(response.get("status", "") or "")
+
+        if success is False:
+            log.error("%s: server-side failure: %s", context, error or "unknown")
+            return False
+        if error:
+            log.error("%s: placement error: %s", context, error)
+            return False
+        if not order_id:
+            log.error("%s: missing order ID in response", context)
+            return False
+
+        if self.cfg.require_full_match and not self._status_is_matched(status):
+            log.error(
+                "%s: order accepted but not immediately matched (status=%s) -- aborting arb.",
+                context,
+                status or "unknown",
+            )
+            return False
+
+        return True
+
     def execute_arb(self, opp: ArbOpportunity) -> bool:
         """
         Execute an arbitrage opportunity by buying all legs.
@@ -50,6 +85,9 @@ class Executor:
             return False
 
         shares = int(shares)  # Polymarket uses whole shares
+        if shares < 1:
+            log.warning("Cannot execute arb: rounded share size is < 1.")
+            return False
 
         total_cost = shares * cost_per_set
         fee_label = f"fee={opp.fee_rate_bps}bps" if opp.fee_rate_bps > 0 else "NO FEES"
@@ -61,18 +99,21 @@ class Executor:
         if self.dry_run:
             log.info("DRY RUN -- trade NOT submitted.")
             self._record_trade(opp, shares, total_cost, dry_run=True)
-            self.risk.record_exposure(total_cost)
+            self.risk.record_exposure(
+                total_cost,
+                condition_id=opp.market.condition_id,
+                question=opp.market.question,
+            )
             return True
 
         # 2. Pre-trade balance check
         if self.cfg.balance_check_enabled:
             clob_balance = self.poly.get_usdc_balance()
             wallet_balance = self.poly.get_onchain_usdc_balance()
-            available = max(clob_balance, wallet_balance)
-            if available < total_cost:
+            if clob_balance < total_cost:
                 log.warning(
-                    "Insufficient USDC balance: available=$%.2f (CLOB=$%.2f, wallet=$%.2f) < needed=$%.2f",
-                    available,
+                    "Insufficient CLOB collateral: CLOB=$%.2f, wallet=$%.2f, needed=$%.2f "
+                    "(wallet funds are not immediately tradable until deposited)",
                     clob_balance,
                     wallet_balance,
                     total_cost,
@@ -86,10 +127,15 @@ class Executor:
             success = self._execute_sequential(opp, shares)
 
         if success:
-            self.risk.record_exposure(total_cost)
+            self.risk.record_exposure(
+                total_cost,
+                condition_id=opp.market.condition_id,
+                question=opp.market.question,
+            )
             self._record_trade(opp, shares, total_cost)
             log.info("ARB EXECUTED SUCCESSFULLY: '%s'", opp.market.question[:50])
         else:
+            self.risk.record_failure()
             self._record_trade(opp, shares, total_cost, failed=True)
 
         return success
@@ -101,12 +147,12 @@ class Executor:
         """
         # Build order list for batch submission
         orders = []
-        order_type = OrderType.GTC
+        order_type = OrderType.FOK if self.cfg.use_fok_orders else OrderType.GTC
         expiration = 0
 
-        # Use GTD with short expiry if configured
+        # Use GTD with short expiry only when not using FOK.
         # API requires: expiration >= now + 60s (security threshold) + desired_expiry
-        if self.cfg.gtd_expiry_seconds > 0:
+        if not self.cfg.use_fok_orders and self.cfg.gtd_expiry_seconds > 0:
             order_type = OrderType.GTD
             security_threshold = 60  # Polymarket requires at least 1 minute buffer
             try:
@@ -133,16 +179,19 @@ class Executor:
             resp = self.poly.place_batch_orders(orders)
             log.info("Batch arb response: %s", resp)
 
-            # Check response for actual success — API may return 'success':True but with errorMsg
-            if isinstance(resp, list):
-                for leg in resp:
-                    if isinstance(leg, dict):
-                        err = leg.get("errorMsg", "")
-                        order_id = leg.get("orderID", "")
-                        if err or not order_id:
-                            log.error("Batch leg REJECTED: %s", err or "no orderID returned")
-                            self._emergency_cancel()
-                            return False
+            if not isinstance(resp, list):
+                log.error("Batch arb response malformed (expected list): %r", resp)
+                self._emergency_cancel()
+                return False
+            if len(resp) != len(orders):
+                log.error("Batch arb response length mismatch: expected=%d got=%d", len(orders), len(resp))
+                self._emergency_cancel()
+                return False
+
+            for idx, leg in enumerate(resp, 1):
+                if not self._validate_order_response(leg, context=f"Batch leg {idx}/{len(resp)}"):
+                    self._emergency_cancel()
+                    return False
             return True
         except Exception as e:
             log.error("BATCH ARB FAILED: %s -- attempting emergency cancel.", e)
@@ -154,15 +203,23 @@ class Executor:
         for token_id, outcome_name, ask_price, _ in opp.legs:
             try:
                 if self.cfg.use_fok_orders:
-                    # FOK: Fill entire leg or reject — no partial fill risk
-                    amount = shares * ask_price
-                    resp = self.poly.place_fok_buy(token_id=token_id, amount=amount)
+                    # FOK at explicit limit price keeps the arb bound deterministic.
+                    resp = self.poly.place_limit_buy(
+                        token_id=token_id,
+                        price=ask_price,
+                        size=shares,
+                        order_type=OrderType.FOK,
+                        expiration=0,
+                    )
                 else:
                     resp = self.poly.place_limit_buy(
                         token_id=token_id,
                         price=ask_price,
                         size=shares,
                     )
+                if not self._validate_order_response(resp, context=f"Sequential leg {outcome_name}"):
+                    self._emergency_cancel()
+                    return False
                 log.info("Leg filled: %s @ %.4f x %d → %s",
                          outcome_name, ask_price, shares, resp)
             except Exception as e:

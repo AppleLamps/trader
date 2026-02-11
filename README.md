@@ -117,6 +117,7 @@ By default, `DRY_RUN=true` -- the bot will scan and log opportunities without pl
 | `USE_FOK_ORDERS` | `true` | Fill-or-kill orders |
 | `USE_BATCH_ORDERS` | `true` | Submit all legs at once |
 | `GTD_EXPIRY_SECONDS` | `30` | GTD expiry (0 = GTC) |
+| `REQUIRE_FULL_MATCH` | `true` | Require every leg to be immediately matched |
 | `BALANCE_CHECK_ENABLED` | `true` | Block trades if balance low |
 
 ## Project Structure

@@ -43,9 +43,13 @@ class ArbOpportunity:
 
 def calculate_fee_per_share(price: float, fee_rate_bps: int) -> float:
     """Calculate fee per share for a given price. Used for arb detection."""
-    if fee_rate_bps == 0:
+    if fee_rate_bps <= 0:
         return 0.0
-    return price * 0.25 * (price * (1.0 - price)) ** 2
+    if price <= 0.0 or price >= 1.0:
+        return 0.0
+    # The documented fee curve is defined for fee_rate_bps=1000.
+    # Scale linearly for other fee rates to avoid overstating profit.
+    return price * 0.25 * (price * (1.0 - price)) ** 2 * (fee_rate_bps / 1000.0)
 
 
 def scan_market_for_arb(

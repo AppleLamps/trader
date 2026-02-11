@@ -48,6 +48,7 @@ class Config:
     use_fok_orders: bool          # Fill-Or-Kill for arb legs
     use_batch_orders: bool        # Batch submit all legs at once
     gtd_expiry_seconds: int       # GTD order expiry (0 = use GTC)
+    require_full_match: bool      # Require every leg to be immediately matched
 
     # Pre-flight checks
     balance_check_enabled: bool
@@ -109,6 +110,7 @@ def load_config() -> Config:
         use_fok_orders=os.getenv("USE_FOK_ORDERS", "true").lower() in ("true", "1", "yes"),
         use_batch_orders=os.getenv("USE_BATCH_ORDERS", "true").lower() in ("true", "1", "yes"),
         gtd_expiry_seconds=int(os.getenv("GTD_EXPIRY_SECONDS", "30")),
+        require_full_match=os.getenv("REQUIRE_FULL_MATCH", "true").lower() in ("true", "1", "yes"),
 
         # Pre-flight
         balance_check_enabled=os.getenv("BALANCE_CHECK_ENABLED", "true").lower() in ("true", "1", "yes"),

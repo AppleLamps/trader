@@ -56,6 +56,7 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
     book_lock = threading.Lock()
     markets_by_token: dict[str, object] = {}  # token_id → Market
     all_markets: list = []
+    refresh_markets_requested = threading.Event()
 
     def on_book_update(data):
         """Called when a full orderbook snapshot is pushed."""
@@ -91,6 +92,8 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
         # Subscribe to the new market's assets for monitoring
         if assets:
             ws_client.subscribe(assets)
+        # Trigger immediate refresh so new market enters scan set quickly.
+        refresh_markets_requested.set()
 
     def on_market_resolved(data):
         """Market resolved — trigger position settlement."""
@@ -142,9 +145,11 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
         try:
             # Use the batch REST endpoint for a full snapshot periodically
             # The WS updates are incremental; we do a full refresh every N cycles
-            if cycle == 1 or cycle % 20 == 0:
+            needs_full_refresh = cycle == 1 or cycle % 20 == 0 or refresh_markets_requested.is_set()
+            if needs_full_refresh:
                 log.info("--- Full market refresh (cycle %d) ---", cycle)
                 all_markets = fetch_active_markets(limit=500, min_liquidity=cfg.min_market_liquidity)
+                refresh_markets_requested.clear()
 
                 # Discover new tokens to subscribe to
                 new_tokens = []
@@ -359,11 +364,9 @@ def main():
     if cfg.balance_check_enabled:
         clob_balance = poly.get_usdc_balance()
         wallet_balance = poly.get_onchain_usdc_balance()
-        total_available = max(clob_balance, wallet_balance)
-        log.info("USDC balance: $%.2f (CLOB: $%.2f | Wallet: $%.2f)",
-                 total_available, clob_balance, wallet_balance)
-        if total_available < 1.0 and not cfg.dry_run:
-            log.error("Insufficient USDC for live trading!")
+        log.info("USDC balances: CLOB=$%.2f (tradable) | Wallet=$%.2f (requires deposit)", clob_balance, wallet_balance)
+        if clob_balance < 1.0 and not cfg.dry_run:
+            log.error("Insufficient CLOB collateral for live trading!")
             sys.exit(1)
 
     risk = RiskManager(cfg)
