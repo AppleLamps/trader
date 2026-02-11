@@ -46,6 +46,7 @@ class PolyWebSocket:
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._subscribed_assets: set[str] = set()
+        self._subscription_lock = threading.Lock()
         self._reconnect_delay = 1  # exponential backoff
 
         # Callbacks
@@ -63,24 +64,24 @@ class PolyWebSocket:
 
         self._running = True
         initial_assets = asset_ids or []
-        self._subscribed_assets.update(initial_assets)
+        with self._subscription_lock:
+            self._subscribed_assets.update(initial_assets)
 
         self._thread = threading.Thread(
             target=self._run_forever,
-            args=(initial_assets,),
             daemon=True,
         )
         self._thread.start()
         log.info("WebSocket connecting to %s with %d initial assets...",
                  self.ws_url, len(initial_assets))
 
-    def _run_forever(self, initial_assets: list[str]) -> None:
+    def _run_forever(self) -> None:
         """Connection loop with auto-reconnect."""
         while self._running:
             try:
                 self.ws = websocket.WebSocketApp(
                     self.ws_url,
-                    on_open=lambda ws: self._on_open(ws, initial_assets),
+                    on_open=self._on_open,
                     on_message=self._on_message,
                     on_error=self._on_error,
                     on_close=self._on_close,
@@ -94,19 +95,22 @@ class PolyWebSocket:
                 time.sleep(self._reconnect_delay)
                 self._reconnect_delay = min(self._reconnect_delay * 2, 30)
 
-    def _on_open(self, ws, initial_assets: list[str]) -> None:
+    def _on_open(self, ws) -> None:
         """Subscribe to market channel on connection."""
         self._reconnect_delay = 1  # reset backoff
+
+        with self._subscription_lock:
+            subscribed_assets = sorted(self._subscribed_assets)
 
         # Subscribe message — market channel, no auth needed
         sub_msg = {
             "type": "MARKET",
-            "assets_ids": initial_assets,
+            "assets_ids": subscribed_assets,
             "custom_feature_enabled": True,  # enables best_bid_ask, new_market, market_resolved
         }
         ws.send(json.dumps(sub_msg))
         log.info("WebSocket connected. Subscribed to %d assets with custom features enabled.",
-                 len(initial_assets))
+                 len(subscribed_assets))
 
     def _on_message(self, ws, message: str) -> None:
         """Route incoming messages to the appropriate callback."""
@@ -154,11 +158,12 @@ class PolyWebSocket:
         if not asset_ids:
             return
 
-        new_ids = [aid for aid in asset_ids if aid not in self._subscribed_assets]
-        if not new_ids:
-            return
-
-        self._subscribed_assets.update(new_ids)
+        with self._subscription_lock:
+            new_ids = [aid for aid in asset_ids if aid not in self._subscribed_assets]
+            if not new_ids:
+                return
+            self._subscribed_assets.update(new_ids)
+            subscribed_total = len(self._subscribed_assets)
 
         if self.ws and self.ws.sock and self.ws.sock.connected:
             msg = {
@@ -169,7 +174,7 @@ class PolyWebSocket:
             try:
                 self.ws.send(json.dumps(msg))
                 log.info("Subscribed to %d additional assets (total: %d)",
-                         len(new_ids), len(self._subscribed_assets))
+                         len(new_ids), subscribed_total)
             except Exception as e:
                 log.error("Failed to subscribe to new assets: %s", e)
 
@@ -178,7 +183,8 @@ class PolyWebSocket:
         if not asset_ids:
             return
 
-        self._subscribed_assets -= set(asset_ids)
+        with self._subscription_lock:
+            self._subscribed_assets -= set(asset_ids)
 
         if self.ws and self.ws.sock and self.ws.sock.connected:
             msg = {

@@ -22,9 +22,6 @@ log = logging.getLogger("polyarb.merger")
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 
-# Neg-risk adapter
-NEG_RISK_ADAPTER = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-
 # Minimal ABI for mergePositions and redeemPositions
 CTF_ABI = [
     {
@@ -89,6 +86,15 @@ class CTFMerger:
 
         log.info("CTF Merger initialized for %s", self.address)
 
+    @staticmethod
+    def _condition_id_to_bytes(condition_id: str | bytes) -> bytes:
+        """Normalize a condition ID into bytes32."""
+        if isinstance(condition_id, bytes):
+            return condition_id
+        if condition_id.startswith("0x"):
+            return bytes.fromhex(condition_id[2:])
+        return bytes.fromhex(condition_id)
+
     def merge_positions(self, condition_id: str, amount: int) -> str | None:
         """
         Merge YES + NO tokens back into USDC.
@@ -110,14 +116,7 @@ class CTFMerger:
             partition = [1, 2]
             parent_collection_id = bytes(32)  # null for Polymarket
 
-            # Ensure condition_id is bytes32
-            if isinstance(condition_id, str):
-                if condition_id.startswith("0x"):
-                    condition_bytes = bytes.fromhex(condition_id[2:])
-                else:
-                    condition_bytes = bytes.fromhex(condition_id)
-            else:
-                condition_bytes = condition_id
+            condition_bytes = self._condition_id_to_bytes(condition_id)
 
             tx = self.ctf.functions.mergePositions(
                 Web3.to_checksum_address(USDC_ADDRESS),
@@ -165,13 +164,7 @@ class CTFMerger:
             index_sets = [1, 2]
             parent_collection_id = bytes(32)
 
-            if isinstance(condition_id, str):
-                if condition_id.startswith("0x"):
-                    condition_bytes = bytes.fromhex(condition_id[2:])
-                else:
-                    condition_bytes = bytes.fromhex(condition_id)
-            else:
-                condition_bytes = condition_id
+            condition_bytes = self._condition_id_to_bytes(condition_id)
 
             tx = self.ctf.functions.redeemPositions(
                 Web3.to_checksum_address(USDC_ADDRESS),

@@ -41,24 +41,6 @@ class ArbOpportunity:
     fee_rate_bps: int = 0    # Actual fee rate for this market
 
 
-def calculate_polymarket_fee(price: float, shares: float, fee_rate_bps: int) -> float:
-    """
-    Calculate Polymarket's curved taker fee.
-
-    Most prediction markets have fee_rate_bps=0 (NO FEES).
-    Only 15-minute crypto markets have fees, using the formula:
-      fee = shares × price × 0.25 × (price × (1 - price))²
-
-    The fee_rate_bps from the API indicates whether fees apply.
-    """
-    if fee_rate_bps == 0:
-        return 0.0
-
-    # Polymarket's curved fee formula (peaks at 50/50 price, zero at extremes)
-    fee = shares * price * 0.25 * (price * (1.0 - price)) ** 2
-    return max(fee, 0.0)
-
-
 def calculate_fee_per_share(price: float, fee_rate_bps: int) -> float:
     """Calculate fee per share for a given price. Used for arb detection."""
     if fee_rate_bps == 0:
@@ -197,6 +179,8 @@ def scan_all_markets(
     min_arb_value: float = 0.50,
     min_cost_threshold: float = 0.90,
     max_profit_per_share: float = 0.05,
+    preloaded_orderbooks: dict[str, object] | None = None,
+    fetch_missing_orderbooks: bool = True,
 ) -> list[ArbOpportunity]:
     """
     Scan a list of markets using BATCH orderbook fetching.
@@ -206,32 +190,40 @@ def scan_all_markets(
     """
     opportunities: list[ArbOpportunity] = []
 
-    # Collect all token IDs we need orderbooks for
-    all_token_ids = []
-    token_to_market: dict[str, Market] = {}
-    for market in markets:
-        for outcome in market.outcomes:
-            all_token_ids.append(outcome.token_id)
-            token_to_market[outcome.token_id] = market
+    # Collect unique token IDs once; duplicate IDs cause redundant API work.
+    all_token_ids = list(dict.fromkeys(
+        outcome.token_id
+        for market in markets
+        for outcome in market.outcomes
+    ))
 
     if not all_token_ids:
         return opportunities
 
-    log.info("Batch fetching %d orderbooks...", len(all_token_ids))
+    orderbooks: dict[str, object] = dict(preloaded_orderbooks or {})
+    missing_token_ids = [tid for tid in all_token_ids if tid not in orderbooks]
 
-    # BATCH FETCH: 500 tokens per API call instead of 1 per call
-    orderbook_list = poly.get_order_books_batch(all_token_ids)
+    if missing_token_ids and fetch_missing_orderbooks:
+        log.info("Batch fetching %d missing orderbooks...", len(missing_token_ids))
+        # BATCH FETCH: 500 tokens per API call instead of 1 per call
+        orderbook_list = poly.get_order_books_batch(missing_token_ids)
 
-    # Map token_id → orderbook for quick lookup
-    orderbooks: dict[str, object] = {}
-    for i, tid in enumerate(all_token_ids):
-        if i < len(orderbook_list):
-            orderbooks[tid] = orderbook_list[i]
+        # Map token_id → orderbook for quick lookup
+        for tid, order_book in zip(missing_token_ids, orderbook_list):
+            orderbooks[tid] = order_book
 
     # Scan each market using pre-fetched orderbooks
     for market in markets:
-        opp = scan_market_for_arb(poly, market, orderbooks, min_profit, min_depth,
-                                  min_arb_value, min_cost_threshold, max_profit_per_share)
+        opp = scan_market_for_arb(
+            poly=poly,
+            market=market,
+            orderbooks=orderbooks,
+            min_profit=min_profit,
+            min_depth=min_depth,
+            min_arb_value=min_arb_value,
+            min_cost_threshold=min_cost_threshold,
+            max_profit_per_share=max_profit_per_share,
+        )
         if opp is not None:
             opportunities.append(opp)
 

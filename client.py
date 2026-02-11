@@ -22,16 +22,16 @@ import time
 import threading
 from typing import Optional
 
+import requests
+
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     OrderArgs,
     MarketOrderArgs,
     OrderType,
-    ApiCreds,
     BookParams,
     BalanceAllowanceParams,
     OrderScoringParams,
-    OrdersScoringParams,
     PostOrdersArgs,
 )
 
@@ -46,6 +46,11 @@ SELL = "SELL"
 class AssetType:
     COLLATERAL = "COLLATERAL"
     CONDITIONAL = "CONDITIONAL"
+
+
+POLYGON_RPC_URL = "https://polygon-rpc.com"
+USDC_ADDRESS_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+ONCHAIN_BALANCE_CACHE_TTL_SECONDS = 3.0
 
 
 class PolyClient:
@@ -77,7 +82,7 @@ class PolyClient:
             funder=cfg.funder_address,
             builder_config=self._builder_config,
         )
-        self._authenticated = False
+        self.close_only = False
 
         # Heartbeat state
         self._heartbeat_id: Optional[str] = None
@@ -87,15 +92,19 @@ class PolyClient:
         # Orderbook hash cache for change detection
         self._ob_hash_cache: dict[str, str] = {}
 
+        # Reused HTTP session + short TTL cache for on-chain balance checks.
+        self._rpc_session = requests.Session()
+        self._cache_lock = threading.Lock()
+        self._onchain_usdc_cache_value = 0.0
+        self._onchain_usdc_cache_ts = 0.0
+
     def authenticate(self) -> None:
         """Derive or create API credentials and attach them to the client."""
         log.info("Deriving API credentials...")
         creds = self.client.create_or_derive_api_creds()
         self.client.set_api_creds(creds)
-        self._authenticated = True
 
         # Check if account is restricted
-        self.close_only = False
         try:
             result = self.client.get_closed_only_mode()
             # API may return a dict like {"closed_only": true} or a bool
@@ -132,21 +141,71 @@ class PolyClient:
         """Fetch the current order book for a token."""
         return self.client.get_order_book(token_id)
 
+    @staticmethod
+    def _iter_book_levels(order_book, side: str):
+        """
+        Read orderbook levels from either py-clob objects or WS/REST dict payloads.
+        """
+        if order_book is None:
+            return []
+        if isinstance(order_book, dict):
+            levels = order_book.get(side)
+            if levels is None and side == "asks":
+                levels = order_book.get("sells")
+            if levels is None and side == "bids":
+                levels = order_book.get("buys")
+            return levels or []
+        return getattr(order_book, side, []) or []
+
+    @staticmethod
+    def _parse_level(level) -> tuple[float, float] | None:
+        """Parse one price level into (price, size)."""
+        try:
+            if isinstance(level, dict):
+                return float(level.get("price", 0)), float(level.get("size", 0))
+            return float(level.price), float(level.size)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
     def get_best_ask(self, order_book) -> tuple[float, float] | None:
         """Return (price, size) of the best ask, or None if empty."""
-        asks = order_book.asks or []
+        asks = self._iter_book_levels(order_book, "asks")
         if not asks:
             return None
-        best = min(asks, key=lambda x: float(x.price))
-        return float(best.price), float(best.size)
+
+        best_price = float("inf")
+        best_size = 0.0
+        for level in asks:
+            parsed = self._parse_level(level)
+            if parsed is None:
+                continue
+            price, size = parsed
+            if price < best_price:
+                best_price, best_size = price, size
+
+        if best_price == float("inf"):
+            return None
+        return best_price, best_size
 
     def get_best_bid(self, order_book) -> tuple[float, float] | None:
         """Return (price, size) of the best bid, or None if empty."""
-        bids = order_book.bids or []
+        bids = self._iter_book_levels(order_book, "bids")
         if not bids:
             return None
-        best = max(bids, key=lambda x: float(x.price))
-        return float(best.price), float(best.size)
+
+        best_price = float("-inf")
+        best_size = 0.0
+        for level in bids:
+            parsed = self._parse_level(level)
+            if parsed is None:
+                continue
+            price, size = parsed
+            if price > best_price:
+                best_price, best_size = price, size
+
+        if best_price == float("-inf"):
+            return None
+        return best_price, best_size
 
     def get_spread(self, token_id: str) -> dict | None:
         """Get bid-ask spread for a single token."""
@@ -280,21 +339,30 @@ class PolyClient:
             log.error("Failed to get USDC balance: %s", e)
             return 0.0
 
-    def get_onchain_usdc_balance(self) -> float:
+    def get_onchain_usdc_balance(self, use_cache: bool = True) -> float:
         """Get USDC balance in the wallet on Polygon (not yet deposited to CLOB)."""
-        import requests
-        USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+        now = time.time()
+        if use_cache:
+            with self._cache_lock:
+                if (now - self._onchain_usdc_cache_ts) < ONCHAIN_BALANCE_CACHE_TTL_SECONDS:
+                    return self._onchain_usdc_cache_value
+
         wallet = self.cfg.funder_address
         data = "0x70a08231" + wallet[2:].lower().zfill(64)
         payload = {
             "jsonrpc": "2.0", "id": 1, "method": "eth_call",
-            "params": [{"to": USDC_ADDRESS, "data": data}, "latest"]
+            "params": [{"to": USDC_ADDRESS_POLYGON, "data": data}, "latest"]
         }
         try:
-            resp = requests.post("https://polygon-rpc.com", json=payload, timeout=10)
+            resp = self._rpc_session.post(POLYGON_RPC_URL, json=payload, timeout=10)
+            resp.raise_for_status()
             hex_balance = resp.json().get("result", "0x0")
-            return int(hex_balance, 16) / 1e6  # USDC has 6 decimals
-        except Exception as e:
+            balance = int(hex_balance, 16) / 1e6  # USDC has 6 decimals
+            with self._cache_lock:
+                self._onchain_usdc_cache_value = balance
+                self._onchain_usdc_cache_ts = now
+            return balance
+        except (requests.RequestException, ValueError, TypeError) as e:
             log.error("Failed to get on-chain USDC balance: %s", e)
             return 0.0
 
@@ -491,8 +559,10 @@ class PolyClient:
 
     def stop_heartbeat(self) -> None:
         """Stop the heartbeat background thread."""
+        if not self._heartbeat_running:
+            return
         self._heartbeat_running = False
-        if self._heartbeat_thread:
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             self._heartbeat_thread.join(timeout=10)
         log.info("Heartbeat stopped.")
 

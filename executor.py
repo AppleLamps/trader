@@ -66,9 +66,17 @@ class Executor:
 
         # 2. Pre-trade balance check
         if self.cfg.balance_check_enabled:
-            balance = self.poly.get_onchain_usdc_balance()
-            if balance < total_cost:
-                log.warning("Insufficient USDC balance: $%.2f < $%.2f needed", balance, total_cost)
+            clob_balance = self.poly.get_usdc_balance()
+            wallet_balance = self.poly.get_onchain_usdc_balance()
+            available = max(clob_balance, wallet_balance)
+            if available < total_cost:
+                log.warning(
+                    "Insufficient USDC balance: available=$%.2f (CLOB=$%.2f, wallet=$%.2f) < needed=$%.2f",
+                    available,
+                    clob_balance,
+                    wallet_balance,
+                    total_cost,
+                )
                 return False
 
         # 3. Execute — choose strategy based on config
@@ -106,12 +114,12 @@ class Executor:
                 if isinstance(server_time, dict):
                     now_ts = int(server_time.get("timestamp", time.time()))
                 else:
-                    now_ts = int(time.time())
-            except Exception:
+                    now_ts = int(server_time)
+            except (TypeError, ValueError):
                 now_ts = int(time.time())
             expiration = now_ts + security_threshold + self.cfg.gtd_expiry_seconds
 
-        for token_id, outcome_name, ask_price, _ in opp.legs:
+        for token_id, _, ask_price, _ in opp.legs:
             orders.append({
                 "token_id": token_id,
                 "price": ask_price,
