@@ -14,6 +14,25 @@ import requests
 log = logging.getLogger("polyarb.markets")
 
 GAMMA_API = "https://gamma-api.polymarket.com"
+GAMMA_TIMEOUT_SECONDS = 15
+_GAMMA_SESSION = requests.Session()
+
+
+def _parse_json_array(value) -> list:
+    """Accept list or JSON-encoded list; return [] on malformed input."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        if not value:
+            return []
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
 
 
 @dataclass
@@ -58,17 +77,22 @@ def fetch_active_markets(
     offset = 0
 
     while len(markets) < limit:
+        page_limit = min(100, max(limit - len(markets) + 50, 1))
         params = {
-            "limit": min(100, limit - len(markets) + 50),  # overfetch to compensate for filtering
+            "limit": page_limit,  # overfetch to compensate for filtering
             "offset": offset,
             "active": "true",
             "closed": "false",
         }
         try:
-            resp = requests.get(f"{GAMMA_API}/markets", params=params, timeout=15)
+            resp = _GAMMA_SESSION.get(
+                f"{GAMMA_API}/markets",
+                params=params,
+                timeout=GAMMA_TIMEOUT_SECONDS,
+            )
             resp.raise_for_status()
             data = resp.json()
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError) as e:
             log.error("Gamma API request failed: %s", e)
             break
 
@@ -76,19 +100,12 @@ def fetch_active_markets(
             break
 
         for item in data:
-            token_ids = item.get("clobTokenIds") or item.get("clob_token_ids")
-            outcome_names = item.get("outcomes")
-            outcome_prices = item.get("outcomePrices") or item.get("outcome_prices")
+            token_ids = _parse_json_array(item.get("clobTokenIds") or item.get("clob_token_ids"))
+            outcome_names = _parse_json_array(item.get("outcomes"))
+            outcome_prices = _parse_json_array(item.get("outcomePrices") or item.get("outcome_prices"))
 
             if not token_ids or not outcome_names:
                 continue
-
-            if isinstance(token_ids, str):
-                token_ids = json.loads(token_ids)
-            if isinstance(outcome_names, str):
-                outcome_names = json.loads(outcome_names)
-            if isinstance(outcome_prices, str):
-                outcome_prices = json.loads(outcome_prices)
 
             liq = float(item.get("liquidity", 0) or 0)
             if liq < min_liquidity:

@@ -36,7 +36,7 @@ from risk import RiskManager
 shutdown_requested = False
 
 
-def handle_signal(signum, frame):
+def handle_signal(_signum, _frame):
     global shutdown_requested
     log = logging.getLogger("polyarb")
     log.info("Shutdown signal received. Finishing current cycle...")
@@ -75,7 +75,6 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
         """BBO update — fast signal that spread changed."""
         asset_id = data.get("asset_id", "")
         best_ask = float(data.get("best_ask", 0) or 0)
-        best_bid = float(data.get("best_bid", 0) or 0)
         spread = float(data.get("spread", 1) or 1)
 
         # Quick check: can this asset be part of an arb?
@@ -159,7 +158,27 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
                     ws_client.subscribe(new_tokens)
                     log.info("Subscribed to %d new tokens", len(new_tokens))
 
-            # Scan using batch orderbook fetch (fast even without WS data)
+            with book_lock:
+                ws_orderbooks = dict(live_books)
+
+            token_count = len(markets_by_token)
+            ws_coverage = (len(ws_orderbooks) / token_count) if token_count else 0.0
+
+            # Prefer WS snapshots for speed; periodically backfill missing books via REST.
+            use_rest_fallback = (
+                cycle == 1
+                or cycle % 30 == 0
+                or (ws_coverage < 0.60 and cycle % 5 == 0)
+            )
+
+            if use_rest_fallback and token_count:
+                log.debug(
+                    "WS coverage %.1f%% (%d/%d books) -- REST fallback enabled this cycle.",
+                    ws_coverage * 100.0,
+                    len(ws_orderbooks),
+                    token_count,
+                )
+
             opps = scan_all_markets(
                 poly=poly,
                 markets=all_markets,
@@ -168,6 +187,8 @@ def run_websocket_mode(cfg, log, poly, risk, executor):
                 min_arb_value=cfg.min_arb_value,
                 min_cost_threshold=cfg.min_cost_threshold,
                 max_profit_per_share=cfg.max_profit_per_share,
+                preloaded_orderbooks=ws_orderbooks if ws_orderbooks else None,
+                fetch_missing_orderbooks=use_rest_fallback,
             )
 
             total_arbs_found += len(opps)
