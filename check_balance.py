@@ -1,15 +1,23 @@
-"""Check USDC balance on Polymarket."""
+"""Check USDC balances available for trading."""
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+from client import PolyClient
+from config import load_config
 
-KEY = "0xf92e5de4b43b0ba8155db1cc9f85ab1b16980577698efe6e3dfc7b32c156ba58"
-FUNDER = "0x003D2F5Fc0a0E6018DD30Cf137cC85a4a3718c5d"
 
-client = ClobClient(host="https://clob.polymarket.com", key=KEY, chain_id=137, funder=FUNDER)
-creds = client.create_or_derive_api_creds()
-client.set_api_creds(creds)
+def main() -> None:
+    cfg = load_config()
+    poly = PolyClient(cfg)
+    poly.authenticate()
 
-params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-result = client.get_balance_allowance(params)
-print(f"USDC Balance:   {result}")
+    clob_balance = poly.get_usdc_balance()
+    wallet_balance = poly.get_onchain_usdc_balance(use_cache=False)
+    available = max(clob_balance, wallet_balance)
+
+    print("USDC balances")
+    print(f"  CLOB collateral: ${clob_balance:.2f}")
+    print(f"  Wallet on-chain: ${wallet_balance:.2f}")
+    print(f"  Max spendable now: ${available:.2f}")
+
+
+if __name__ == "__main__":
+    main()
