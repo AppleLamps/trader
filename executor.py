@@ -40,6 +40,39 @@ class Executor:
         self.cfg = cfg
         self.dry_run = dry_run
         self.trade_log: list[dict] = []
+        self._market_cooldowns: dict[str, float] = {}
+
+    @staticmethod
+    def _normalize_condition_id(condition_id: str) -> str:
+        cid = (condition_id or "").strip().lower()
+        return cid[2:] if cid.startswith("0x") else cid
+
+    def _cooldown_remaining(self, condition_id: str) -> float:
+        if self.cfg.failure_cooldown_seconds <= 0:
+            return 0.0
+        cid = self._normalize_condition_id(condition_id)
+        if not cid:
+            return 0.0
+        now = time.time()
+        expires_at = self._market_cooldowns.get(cid, 0.0)
+        if expires_at <= now:
+            self._market_cooldowns.pop(cid, None)
+            return 0.0
+        return expires_at - now
+
+    def _set_failure_cooldown(self, condition_id: str) -> None:
+        if self.cfg.failure_cooldown_seconds <= 0:
+            return
+        cid = self._normalize_condition_id(condition_id)
+        if not cid:
+            return
+        expires_at = time.time() + self.cfg.failure_cooldown_seconds
+        self._market_cooldowns[cid] = expires_at
+        log.info(
+            "Market cooldown enabled for %s (%.0fs after failed attempt).",
+            cid[:20],
+            self.cfg.failure_cooldown_seconds,
+        )
 
     @staticmethod
     def _status_is_matched(status: str) -> bool:
@@ -81,6 +114,15 @@ class Executor:
         Execute an arbitrage opportunity by buying all legs.
         Returns True if all legs were filled, False otherwise.
         """
+        cooldown_remaining = self._cooldown_remaining(opp.market.condition_id)
+        if cooldown_remaining > 0:
+            log.debug(
+                "Skipping '%s': market is on %.1fs cooldown after recent failure.",
+                opp.market.question[:50],
+                cooldown_remaining,
+            )
+            return False
+
         # 1. Determine position size (capped by risk limits)
         desired_shares = opp.max_shares
         allowed_cost = self.risk.max_allowed_cost()
@@ -136,6 +178,7 @@ class Executor:
             success = self._execute_sequential(opp, shares)
 
         if success:
+            self._market_cooldowns.pop(self._normalize_condition_id(opp.market.condition_id), None)
             self.risk.record_exposure(
                 total_cost,
                 condition_id=opp.market.condition_id,
@@ -145,6 +188,7 @@ class Executor:
             log.info("ARB EXECUTED SUCCESSFULLY: '%s'", opp.market.question[:50])
         else:
             self.risk.record_failure()
+            self._set_failure_cooldown(opp.market.condition_id)
             self._record_trade(opp, shares, total_cost, failed=True)
 
         return success
@@ -254,6 +298,9 @@ class Executor:
             "cost": cost,
             "profit_per_share": opp.profit_per_share,
             "expected_profit": opp.profit_per_share * shares,
+            "roi": opp.roi,
+            "fill_confidence": opp.fill_confidence,
+            "priority_score": opp.priority_score,
             "fee_rate_bps": opp.fee_rate_bps,
             "dry_run": dry_run,
             "failed": failed,

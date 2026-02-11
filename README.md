@@ -100,8 +100,11 @@ By default, `DRY_RUN=true` -- the bot will scan and log opportunities without pl
 | `CLOB_HOST` | `https://clob.polymarket.com` | CLOB API endpoint |
 | `CHAIN_ID` | `137` | Polygon mainnet |
 | `MIN_PROFIT_MARGIN` | `0.005` | Min profit per share to trigger arb ($) |
+| `MIN_ROI` | `0.004` | Min ROI per arb (profit / total cost) |
+| `MIN_FILL_CONFIDENCE` | `0.35` | Min fill confidence score for opportunity |
 | `MAX_POSITION_SIZE` | `10.0` | Max USDC per single trade |
 | `MAX_TOTAL_EXPOSURE` | `100.0` | Max total USDC across all positions |
+| `MAX_TRADES_PER_CYCLE` | `3` | Max successful executions per scan cycle |
 | `SCAN_INTERVAL` | `10` | Seconds between scans |
 | `MIN_BOOK_DEPTH` | `5` | Min shares on ask side to consider |
 | `DRY_RUN` | `true` | Log-only mode (no real trades) |
@@ -118,6 +121,7 @@ By default, `DRY_RUN=true` -- the bot will scan and log opportunities without pl
 | `USE_BATCH_ORDERS` | `true` | Submit all legs at once |
 | `GTD_EXPIRY_SECONDS` | `30` | GTD expiry (0 = GTC) |
 | `REQUIRE_FULL_MATCH` | `true` | Require every leg to be immediately matched |
+| `FAILURE_COOLDOWN_SECONDS` | `20` | Cooldown after failed market execution |
 | `BALANCE_CHECK_ENABLED` | `true` | Block trades if balance low |
 
 ## Project Structure

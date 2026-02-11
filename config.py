@@ -27,8 +27,11 @@ class Config:
 
     # Strategy — fees are now fetched per-market from the API
     min_profit_margin: float
+    min_roi: float
+    min_fill_confidence: float
     max_position_size: float
     max_total_exposure: float
+    max_trades_per_cycle: int
     scan_interval: int
     min_book_depth: float
     dry_run: bool
@@ -53,6 +56,7 @@ class Config:
     use_batch_orders: bool        # Batch submit all legs at once
     gtd_expiry_seconds: int       # GTD order expiry (0 = use GTC)
     require_full_match: bool      # Require every leg to be immediately matched
+    failure_cooldown_seconds: int # Back off failed markets to avoid churn
 
     # Pre-flight checks
     balance_check_enabled: bool
@@ -89,8 +93,11 @@ def load_config() -> Config:
 
         # Strategy — no more hardcoded taker_fee_rate; fees are fetched per-market
         min_profit_margin=float(os.getenv("MIN_PROFIT_MARGIN", "0.005")),
+        min_roi=float(os.getenv("MIN_ROI", "0.004")),
+        min_fill_confidence=float(os.getenv("MIN_FILL_CONFIDENCE", "0.35")),
         max_position_size=float(os.getenv("MAX_POSITION_SIZE", "50.0")),
         max_total_exposure=float(os.getenv("MAX_TOTAL_EXPOSURE", "500.0")),
+        max_trades_per_cycle=int(os.getenv("MAX_TRADES_PER_CYCLE", "3")),
         scan_interval=int(os.getenv("SCAN_INTERVAL", "10")),
         min_book_depth=float(os.getenv("MIN_BOOK_DEPTH", "100")),
         dry_run=os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes"),
@@ -115,6 +122,7 @@ def load_config() -> Config:
         use_batch_orders=os.getenv("USE_BATCH_ORDERS", "true").lower() in ("true", "1", "yes"),
         gtd_expiry_seconds=int(os.getenv("GTD_EXPIRY_SECONDS", "30")),
         require_full_match=os.getenv("REQUIRE_FULL_MATCH", "true").lower() in ("true", "1", "yes"),
+        failure_cooldown_seconds=int(os.getenv("FAILURE_COOLDOWN_SECONDS", "20")),
 
         # Pre-flight
         balance_check_enabled=os.getenv("BALANCE_CHECK_ENABLED", "true").lower() in ("true", "1", "yes"),

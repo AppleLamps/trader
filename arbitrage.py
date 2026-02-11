@@ -41,6 +41,9 @@ class ArbOpportunity:
     profit_per_share: float  # 1.0 - total_cost_with_fees
     max_shares: float        # Limited by smallest leg size
     estimated_profit: float  # profit_per_share * max_shares
+    roi: float = 0.0         # Return on deployed capital
+    fill_confidence: float = 0.0  # Heuristic confidence in immediate fill
+    priority_score: float = 0.0   # Ranking score for execution order
     fee_rate_bps: int = 0    # Actual fee rate for this market
 
 
@@ -55,6 +58,22 @@ def calculate_fee_per_share(price: float, fee_rate_bps: int) -> float:
     return price * 0.25 * (price * (1.0 - price)) ** 2 * (fee_rate_bps / 1000.0)
 
 
+def calculate_fill_confidence(max_shares: float, min_depth: float, leg_count: int) -> float:
+    """
+    Heuristic fill confidence:
+      - higher when top-of-book depth is much larger than required minimum
+      - lower for multi-leg arbs (more legs = higher completion risk)
+    """
+    if max_shares <= 0:
+        return 0.0
+    depth_baseline = max(min_depth, 1.0)
+    depth_multiple = max_shares / depth_baseline
+    depth_confidence = min(1.0, depth_multiple / 2.0)  # 1.0 once depth >= 2x baseline
+    legs_penalty = 1.0 / (1.0 + 0.20 * max(0, leg_count - 2))
+    confidence = depth_confidence * legs_penalty
+    return max(0.0, min(1.0, confidence))
+
+
 def scan_market_for_arb(
     poly: "PolyClient",
     market: Market,
@@ -64,6 +83,8 @@ def scan_market_for_arb(
     min_arb_value: float = 0.50,
     min_cost_threshold: float = 0.90,
     max_profit_per_share: float = 0.05,
+    min_roi: float = 0.004,
+    min_fill_confidence: float = 0.35,
 ) -> ArbOpportunity | None:
     """
     Check a single market for arbitrage opportunity using pre-fetched orderbooks.
@@ -143,6 +164,14 @@ def scan_market_for_arb(
 
     max_shares = min(size for _, _, _, size in legs)
     estimated_profit = profit_per_share * max_shares
+    roi = (profit_per_share / total_cost_with_fees) if total_cost_with_fees > 0 else 0.0
+
+    if roi < min_roi:
+        log.debug(
+            "REJECTED (low ROI): '%s' — roi %.3f%% < min %.3f%%",
+            market.question[:50], roi * 100.0, min_roi * 100.0,
+        )
+        return None
 
     # Filter out arbs worth less than the minimum dollar threshold
     if estimated_profit < min_arb_value:
@@ -152,6 +181,21 @@ def scan_market_for_arb(
         )
         return None
 
+    fill_confidence = calculate_fill_confidence(
+        max_shares=max_shares,
+        min_depth=min_depth,
+        leg_count=len(legs),
+    )
+    if fill_confidence < min_fill_confidence:
+        log.debug(
+            "REJECTED (low fill confidence): '%s' — %.0f%% < min %.0f%%",
+            market.question[:50], fill_confidence * 100.0, min_fill_confidence * 100.0,
+        )
+        return None
+
+    # Prioritize opportunities by expected capital efficiency and completion probability.
+    priority_score = roi * fill_confidence * 100.0
+
     opp = ArbOpportunity(
         market=market,
         legs=legs,
@@ -160,16 +204,22 @@ def scan_market_for_arb(
         profit_per_share=profit_per_share,
         max_shares=max_shares,
         estimated_profit=estimated_profit,
+        roi=roi,
+        fill_confidence=fill_confidence,
+        priority_score=priority_score,
         fee_rate_bps=fee_rate_bps,
     )
 
     fee_label = f"fee={fee_rate_bps}bps" if fee_rate_bps > 0 else "NO FEES"
     log.info(
-        "ARB FOUND: '%s' | cost=%.4f | w/fees=%.4f | profit/share=$%.4f | max=%.0f | est=$%.2f | %s",
+        "ARB FOUND: '%s' | cost=%.4f | w/fees=%.4f | profit/share=$%.4f | roi=%.2f%% | fill=%.0f%% | score=%.3f | max=%.0f | est=$%.2f | %s",
         market.question[:60],
         total_cost,
         total_cost_with_fees,
         profit_per_share,
+        roi * 100.0,
+        fill_confidence * 100.0,
+        priority_score,
         max_shares,
         opp.estimated_profit,
         fee_label,
@@ -186,6 +236,8 @@ def scan_all_markets(
     min_arb_value: float = 0.50,
     min_cost_threshold: float = 0.90,
     max_profit_per_share: float = 0.05,
+    min_roi: float = 0.004,
+    min_fill_confidence: float = 0.35,
     preloaded_orderbooks: dict[str, object] | None = None,
     fetch_missing_orderbooks: bool = True,
 ) -> list[ArbOpportunity]:
@@ -230,10 +282,12 @@ def scan_all_markets(
             min_arb_value=min_arb_value,
             min_cost_threshold=min_cost_threshold,
             max_profit_per_share=max_profit_per_share,
+            min_roi=min_roi,
+            min_fill_confidence=min_fill_confidence,
         )
         if opp is not None:
             opportunities.append(opp)
 
-    # Sort by estimated profit descending (best arbs first)
-    opportunities.sort(key=lambda o: o.estimated_profit, reverse=True)
+    # Sort by ranking score, then expected profit as tiebreaker.
+    opportunities.sort(key=lambda o: (o.priority_score, o.estimated_profit), reverse=True)
     return opportunities
