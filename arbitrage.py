@@ -20,9 +20,12 @@ Upgrades:
 
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from client import PolyClient
 from markets import Market
+
+if TYPE_CHECKING:
+    from client import PolyClient
 
 log = logging.getLogger("polyarb.arbitrage")
 
@@ -53,7 +56,7 @@ def calculate_fee_per_share(price: float, fee_rate_bps: int) -> float:
 
 
 def scan_market_for_arb(
-    poly: PolyClient,
+    poly: "PolyClient",
     market: Market,
     orderbooks: dict[str, object],
     min_profit: float,
@@ -176,7 +179,7 @@ def scan_market_for_arb(
 
 
 def scan_all_markets(
-    poly: PolyClient,
+    poly: "PolyClient",
     markets: list[Market],
     min_profit: float,
     min_depth: float,

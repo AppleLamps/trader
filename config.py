@@ -5,7 +5,11 @@ Configuration management — loads settings from .env and validates them.
 import os
 import sys
 from dataclasses import dataclass
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - keeps local tooling usable without optional dependency
+    def load_dotenv(*_args, **_kwargs):
+        return False
 
 
 @dataclass

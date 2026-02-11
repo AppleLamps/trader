@@ -1,13 +1,13 @@
 import unittest
+from types import SimpleNamespace
 
 from arbitrage import ArbOpportunity, calculate_fee_per_share
-from config import Config
 from executor import Executor
 from markets import Market
 from risk import RiskManager
 
 
-def make_config(**overrides) -> Config:
+def make_config(**overrides):
     values = {
         "private_key": "0xabc",
         "funder_address": "0xdef",
@@ -38,7 +38,7 @@ def make_config(**overrides) -> Config:
         "balance_check_enabled": False,
     }
     values.update(overrides)
-    return Config(**values)
+    return SimpleNamespace(**values)
 
 
 def make_opportunity(condition_id: str = "abcd1234") -> ArbOpportunity:

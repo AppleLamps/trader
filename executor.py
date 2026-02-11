@@ -11,13 +11,22 @@ Upgrades:
 
 import logging
 import time
+from typing import TYPE_CHECKING
 
-from py_clob_client.clob_types import OrderType
+try:
+    from py_clob_client.clob_types import OrderType
+except Exception:  # pragma: no cover - allows lightweight local unit tests without full SDK deps
+    class OrderType:
+        GTC = "GTC"
+        FOK = "FOK"
+        GTD = "GTD"
 
 from arbitrage import ArbOpportunity
-from client import PolyClient
 from risk import RiskManager
 from config import Config
+
+if TYPE_CHECKING:
+    from client import PolyClient
 
 log = logging.getLogger("polyarb.executor")
 
@@ -25,7 +34,7 @@ log = logging.getLogger("polyarb.executor")
 class Executor:
     """Handles safe execution of arbitrage trades with batch orders."""
 
-    def __init__(self, poly: PolyClient, risk: "RiskManager", cfg: Config, dry_run: bool = True):
+    def __init__(self, poly: "PolyClient", risk: "RiskManager", cfg: Config, dry_run: bool = True):
         self.poly = poly
         self.risk = risk
         self.cfg = cfg
